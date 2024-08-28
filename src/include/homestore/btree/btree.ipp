@@ -364,7 +364,7 @@ std::string Btree< K, V >::visualize_tree_keys(const std::string& file) const {
     }
 
     buf += "\n" + result + " }\n";
-    BT_LOG(INFO, "Visualize tree keys:\n{}", buf);
+    BT_LOG(INFO, "Visualize tree keys: {}\n{}", file, buf);
     if (!file.empty()) {
         std::ofstream o(file);
         o.write(buf.c_str(), buf.size());

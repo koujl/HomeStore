@@ -240,6 +240,11 @@ public:
         m_fc.inject_delay_flip(flip_name, {null_cond}, freq, delay_usec);
         LOGDEBUG("Flip {} set", flip_name);
     }
+
+    void remove_flip(const std::string flip_name) {
+        m_fc.remove_flip(flip_name);
+        LOGDEBUG("Flip {} removed", flip_name);
+    }
 #endif
 
     static void fill_data_buf(uint8_t* buf, uint64_t size, uint64_t pattern = 0) {

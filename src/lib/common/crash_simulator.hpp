@@ -13,8 +13,8 @@ public:
     ~CrashSimulator() = default;
 
     void crash() {
+        m_crashed.update([](auto *s) { *s = true; });
         if (m_restart_cb) {
-            m_crashed.update([](auto* s) { *s = true; });
 
             // We can restart on a new thread to allow other operations to continue
             std::thread t([cb = std::move(m_restart_cb)]() {

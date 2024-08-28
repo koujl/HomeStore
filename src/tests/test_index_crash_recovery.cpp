@@ -281,6 +281,7 @@ TYPED_TEST(IndexCrashTest, MergeCrash) {
         "crash_flush_on_merge_at_parent",
         "crash_flush_on_merge_at_left_child",
         // "crash_flush_on_merge_at_right_child", // will not crash
+        "crash_flush_on_freed_child",
     };
 
     for (auto flip_point : flip_points) {
@@ -342,6 +343,72 @@ TYPED_TEST(IndexCrashTest, MergeCrash) {
         }
         test_common::HSTestHelper::trigger_cp(true);
         this->get_all();
+    }
+}
+
+TYPED_TEST(IndexCrashTest, MergeManualCrash) {
+    std::vector<std::string> flip_points = {
+        "crash_flush_on_merge_at_parent",
+        "crash_flush_on_merge_at_left_child",
+        // "crash_flush_on_merge_at_right_child", // will not crash
+        "crash_flush_on_freed_child",
+    };
+
+    // Define the lambda function
+    constexpr uint32_t num_entries = 28;
+
+    auto initTree = [this, num_entries]() {
+        for (auto k = 0u; k < num_entries; ++k) {
+            this->put(k, btree_put_type::INSERT, true /* expect_success */);
+        }
+        test_common::HSTestHelper::trigger_cp(true);
+        this->m_shadow_map.save(this->m_shadow_filename);
+    };
+    auto cleanupTree = [this, num_entries]() {
+        for (auto k = 0u; k < num_entries; ++k) {
+            this->remove_one(k, false);
+        }
+        test_common::HSTestHelper::trigger_cp(true);
+        this->get_all();
+    };
+
+    std::vector<std::vector<uint32_t> > removing_scenarios = {
+        // {27, 26, 25, 24, 23, 22}, // Merge 2 rightmost leaf nodes in 1 action
+        // {27, 26, 25, 24, 23, 20, 19}, // Merge 3 rightmost leaf nodes in 1 action
+        // {27, 26, 25, 24, 23, 22, 21, 20, 19}, // Merge 3 rightmost leaf nodes in 2 actions
+        {27, 26, 25, 24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12}, // Merge across different levels
+    };
+
+    for (int i = 0; i < static_cast<int>(removing_scenarios.size()); i++) {
+        auto scenario = removing_scenarios[i];
+        auto s_idx = i + 1;
+        LOGINFO("\n\tTesting scenario {}", s_idx);
+        for (int j = 0; j < static_cast<int>(flip_points.size()); j++) {
+            const auto &flip_point = flip_points[j];
+            auto f_idx = j + 1;
+            LOGINFO("\n\t\t\t\tTesting flip point: {}", flip_point);
+
+            LOGINFO("Step {}-{}-1: Populate keys and flush", s_idx, f_idx);
+            initTree();
+            this->visualize_keys(fmt::format("tree_init.{}_{}.dot", s_idx, f_idx));
+
+            LOGINFO("Step {}-{}-2: Set crash flag, remove keys in reverse order", s_idx, f_idx);
+            this->set_basic_flip(flip_point, 100);
+            for (auto k: scenario) {
+                LOGINFO("Removing entry {}", k);
+                this->remove_one(k);
+            }
+            this->visualize_keys(fmt::format("tree_before_first_crash.{}_{}.dot", s_idx, f_idx));
+            this->remove_flip(flip_point);
+
+            LOGINFO("Step {}-{}-3: Trigger cp to crash", s_idx, f_idx);
+            this->crash_and_recover(0, scenario.back() - 1, true);
+            test_common::HSTestHelper::trigger_cp(true);
+            this->get_all();
+
+            LOGINFO("Step {}-{}-4: Cleanup the tree", s_idx, f_idx);
+            cleanupTree();
+        }
     }
 }
 #endif

@@ -103,7 +103,7 @@ struct IndexBuffer : public sisl::ObjLifeCounter< IndexBuffer > {
 
 #ifdef _PRERELEASE
     bool m_crash_flag_on{false};
-    void set_crash_flag() { m_crash_flag_on = true; }
+    void set_crash_flag(bool flag = true) { m_crash_flag_on = flag; }
 #endif
 
     uint32_t m_index_ordinal{0};  // Ordinal of the index table this buffer belongs to, used only during recovery

@@ -225,12 +225,13 @@ static void set_crash_flips(IndexBufferPtr const& parent_buf, IndexBufferPtr con
         }
     } else if (!freed_node_bufs.empty() && (new_node_bufs.size() != freed_node_bufs.size())) {
         // Its a merge nodes sitation
-        if (iomgr_flip::instance()->test_flip("crash_flush_on_merge_at_parent")) {
-            parent_buf->set_crash_flag();
-        } else if (iomgr_flip::instance()->test_flip("crash_flush_on_merge_at_left_child")) {
-            child_buf->set_crash_flag();
-        } else if (iomgr_flip::instance()->test_flip("crash_flush_on_merge_at_right_child")) {
-            if (!new_node_bufs.empty()) { new_node_bufs[0]->set_crash_flag(); }
+        parent_buf->set_crash_flag(iomgr_flip::instance()->test_flip("crash_flush_on_merge_at_parent"));
+        child_buf->set_crash_flag(iomgr_flip::instance()->test_flip("crash_flush_on_merge_at_left_child"));
+        if (!new_node_bufs.empty()) {
+            new_node_bufs[0]->set_crash_flag(iomgr_flip::instance()->test_flip("crash_flush_on_merge_at_right_child"));
+        }
+        if (!freed_node_bufs.empty()) {
+            freed_node_bufs[0]->set_crash_flag(iomgr_flip::instance()->test_flip("crash_flush_on_freed_child"));
         }
     } else if (!freed_node_bufs.empty() && (new_node_bufs.size() == freed_node_bufs.size())) {
         // Its a rebalance node situation
@@ -240,6 +241,8 @@ static void set_crash_flips(IndexBufferPtr const& parent_buf, IndexBufferPtr con
             child_buf->set_crash_flag();
         } else if (iomgr_flip::instance()->test_flip("crash_flush_on_rebalance_at_right_child")) {
             if (!new_node_bufs.empty()) { new_node_bufs[0]->set_crash_flag(); }
+        } else if (iomgr_flip::instance()->test_flip("crash_flush_on_freed_child")) {
+            freed_node_bufs[0]->set_crash_flag();
         }
     }
 }
@@ -259,15 +262,8 @@ void IndexWBCache::transact_bufs(uint32_t index_ordinal, IndexBufferPtr const& p
         link_buf(child_buf, buf, true /* is_sibling_link */, cp_ctx);
     }
 
-    for (auto const& buf : freed_node_bufs) {
-        if (!buf->m_wait_for_down_buffers.testz()) {
-            // This buffer has some down bufs depending on it. It can happen for an upper level interior node, where
-            // lower level node (say leaf) has split causing it to write entries in this node, but this node is now
-            // merging with other node, causing it to free. In these rare instances, we link this node to the new
-            // node resulting in waiting for all the down bufs to be flushed before up buf can flush (this buf is
-            // not written anyways)
-            link_buf(child_buf, buf, true /* is_sibling_link */, cp_ctx);
-        }
+    for (auto const &buf: freed_node_bufs) {
+        link_buf(child_buf, buf, true /* is_sibling_link */, cp_ctx);
     }
 
     if (new_node_bufs.empty() && freed_node_bufs.empty()) {
@@ -367,6 +363,17 @@ void IndexWBCache::link_buf(IndexBufferPtr const& up_buf, IndexBufferPtr const& 
     if (down_buf->m_up_buffer) {
         // release existing up_buffer's wait count
         down_buf->m_up_buffer->m_wait_for_down_buffers.decrement();
+#ifndef NDEBUG
+        bool found{false};
+        for (auto it = down_buf->m_up_buffer->m_down_buffers.begin(); it != down_buf->m_up_buffer->m_down_buffers.end(); ++it) {
+            if (it->lock() == buf) {
+                down_buf->m_up_buffer->m_down_buffers.erase(it);
+                found = true;
+                break;
+            }
+        }
+        HS_DBG_ASSERT(found, "Down buffer is linked to Up buf, but up_buf doesn't have down_buf in its list");
+#endif
     }
     real_up_buf->m_wait_for_down_buffers.increment(1);
     down_buf->m_up_buffer = real_up_buf;
@@ -382,9 +389,12 @@ void IndexWBCache::free_buf(const IndexBufferPtr& buf, CPContext* cp_ctx) {
         HS_REL_ASSERT_EQ(done, true, "Race on cache removal of btree blkid?");
     }
     buf->m_node_freed = true;
-
     resource_mgr().inc_free_blk(m_node_size);
-    m_vdev->free_blk(buf->m_blkid, s_cast< VDevCPContext* >(cp_ctx));
+    if (buf->is_clean()) {
+        buf->set_state(index_buf_state_t::DIRTY);
+        r_cast<IndexCPContext *>(cp_ctx)->add_to_dirty_list(buf);
+        resource_mgr().inc_dirty_buf_size(m_node_size);
+    }
 }
 
 //////////////////// Recovery Related section /////////////////////////////////
@@ -556,15 +566,15 @@ folly::Future< bool > IndexWBCache::async_cp_flush(IndexCPContext* cp_ctx) {
 
 void IndexWBCache::do_flush_one_buf(IndexCPContext* cp_ctx, IndexBufferPtr const& buf, bool part_of_batch) {
 #ifdef _PRERELEASE
-    if (buf->m_crash_flag_on) {
+    if (hs()->crash_simulator().is_crashed()) {
+        LOGINFOMOD(wbcache, "crash simulation is ongoing, aid simulation by not flushing");
+        return;
+    } else if (buf->m_crash_flag_on) {
         std::string filename = "crash_buf_" + std::to_string(cp_ctx->id()) + ".dot";
         LOGINFOMOD(wbcache, "Simulating crash while writing buffer {},  stored in file {}", buf->to_string(), filename);
         cp_ctx->to_string_dot(filename);
         hs()->crash_simulator().crash();
         cp_ctx->complete(true);
-        return;
-    } else if (hs()->crash_simulator().is_crashed()) {
-        LOGINFOMOD(wbcache, "crash simulation is ongoing, aid simulation by not flushing");
         return;
     }
 #endif
@@ -581,6 +591,7 @@ void IndexWBCache::do_flush_one_buf(IndexCPContext* cp_ctx, IndexBufferPtr const
     } else if (buf->m_node_freed) {
         LOGTRACEMOD(wbcache, "Not flushing buf {} as it was freed, its here for merely dependency", cp_ctx->id(),
                     buf->to_string());
+        m_vdev->free_blk(buf->m_blkid, s_cast<VDevCPContext *>(cp_ctx));
         process_write_completion(cp_ctx, buf);
     } else {
         LOGTRACEMOD(wbcache, "flushing cp {} buf {} info: {}", cp_ctx->id(), buf->to_string(),
