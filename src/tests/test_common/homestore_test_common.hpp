@@ -198,8 +198,8 @@ public:
         }
 
         homestore::HomeStore::instance()->shutdown();
-        homestore::HomeStore::reset_instance();
         iomanager.stop();
+        homestore::HomeStore::reset_instance();
 
         if (cleanup) {
             remove_files(m_generated_devs);

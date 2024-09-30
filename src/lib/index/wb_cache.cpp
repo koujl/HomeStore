@@ -556,6 +556,10 @@ folly::Future< bool > IndexWBCache::async_cp_flush(IndexCPContext* cp_ctx) {
 
 void IndexWBCache::do_flush_one_buf(IndexCPContext* cp_ctx, IndexBufferPtr const& buf, bool part_of_batch) {
 #ifdef _PRERELEASE
+    if (hs()->crash_simulator().is_crashed()) {
+        LOGINFOMOD(wbcache, "crash simulation is ongoing, aid simulation by not flushing");
+        return;
+    }
     if (buf->m_crash_flag_on) {
 //        std::string filename = "crash_buf_" + std::to_string(cp_ctx->id()) + ".dot";
 //        LOGINFOMOD(wbcache, "Simulating crash while writing buffer {},  stored in file {}", buf->to_string(), filename);
@@ -563,9 +567,6 @@ void IndexWBCache::do_flush_one_buf(IndexCPContext* cp_ctx, IndexBufferPtr const
         LOGINFOMOD(wbcache, "Simulating crash while writing buffer {}", buf->to_string());
         hs()->crash_simulator().crash();
         cp_ctx->complete(true);
-        return;
-    } else if (hs()->crash_simulator().is_crashed()) {
-        LOGINFOMOD(wbcache, "crash simulation is ongoing, aid simulation by not flushing");
         return;
     }
 #endif
@@ -577,6 +578,9 @@ void IndexWBCache::do_flush_one_buf(IndexCPContext* cp_ctx, IndexBufferPtr const
         LOGTRACEMOD(wbcache, "flushing cp {} meta buf {} possibly because of root split", cp_ctx->id(),
                     buf->to_string());
         auto const& sb = r_cast< MetaIndexBuffer* >(buf.get())->m_sb;
+        if (!sb.is_empty()) {
+            meta_service().update_sub_sb(buf->m_bytes, sb.size(), sb.meta_blk());
+        }
         meta_service().update_sub_sb(buf->m_bytes, sb.size(), sb.meta_blk());
         process_write_completion(cp_ctx, buf);
     } else if (buf->m_node_freed) {
@@ -685,7 +689,7 @@ void IndexWBCache::get_next_bufs_internal(IndexCPContext* cp_ctx, uint32_t max_c
         std::optional< IndexBufferPtr > buf = cp_ctx->next_dirty();
         if (!buf) { break; } // End of list
 
-        if ((*buf)->m_wait_for_down_buffers.testz()) {
+        if ((*buf)->state() == index_buf_state_t::DIRTY && (*buf)->m_wait_for_down_buffers.testz()) {
             bufs.emplace_back(std::move(*buf));
             ++count;
         } else {

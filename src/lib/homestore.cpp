@@ -322,7 +322,6 @@ void HomeStore::shutdown() {
     flip::Flip::instance().stop_rpc_server();
 #endif
 
-    HomeStore::reset_instance();
     LOGINFO("Homestore is completed its shutdown");
 }
 
